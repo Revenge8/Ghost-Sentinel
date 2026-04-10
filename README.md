@@ -24,3 +24,7 @@ Ghost Sentinel is a Python-based tool designed for security researchers to monit
   ### 🚧 Status
 This project is currently a Work in Progress. I am actively refining the detection algorithms and expanding the OUI database for better fingerprinting.
    This project is currently a Work in Progress. I am actively refining the detection algorithms and expanding the OUI database for better fingerprinting.
+## 📸 Screenshots
+![Main Dashboard](Ghost_sentinel.png)
+![Scanning Process](Ghost_sentinel2.png)
+![Alerts](Ghost_sentinel3.png)
