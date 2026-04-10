@@ -63,9 +63,6 @@ def _detect_gateway_interface() -> str:
     and Windows (uses socket to probe the gateway-bound interface).
     Falls back to scapy's conf.iface if nothing else works.
     """
-    import platform
-    import subprocess
-
     system = platform.system()
 
     # ── Linux ─────────────────────────────────────────────────────────────
@@ -135,7 +132,7 @@ def _detect_gateway_interface() -> str:
 def _list_interfaces() -> list:
     """
     Return a sorted list of (name, ip, label) tuples for every non-loopback
-    interface that scapy can see.  label is the string shown in the UI dropdown.
+    interface that scapy can see. label is the string shown in the UI dropdown.
     """
     results = []
     gw_iface = _detect_gateway_interface()
@@ -161,6 +158,9 @@ SAVE_FILE = os.path.join(
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+# ── Vendor lookup cache (prevents redundant API calls per session) ─────────
+_vendor_cache: dict = {}
 
 # ─── Passive DHCP Fingerprinting ───────────────────────────────────────────
 
@@ -372,27 +372,28 @@ class NetworkScannerApp(ctk.CTk):
         #                            os, os_confidence, status}
         self.device_first_seen: dict = {}
 
-        # Spoof sessions keyed by target_ip
+        # Spoof sessions keyed by target_ip.
         # Each entry: {stop_event, thread, status, target_mac,
         #              gateway_ip, gateway_mac}
         self._spoof_sessions: dict = {}
 
-        # Scan wake event (lets continuous_scan sleep be interrupted)
+        # Scan wake event (lets continuous_scan sleep be interrupted on demand)
         self._scan_wake = threading.Event()
 
         # ── Active interface selection (set before monitoring starts) ─────
         # List of interface name strings to pass to scapy sniff / arping.
-        # None means "let scapy pick" (equivalent to all interfaces on Linux).
+        # Empty list means "let scapy pick" (equivalent to all interfaces on Linux).
         self._selected_ifaces: list = []
 
         # ── Scan thread registry ──────────────────────────────────────────
         # Keeps references to every background thread started by
         # start_scanning() so stop_scanning() can join them all cleanly.
         self._scan_threads: list = []
+
         # A dedicated stop-event shared by all scan threads in one session.
         self._stop_event: threading.Event = threading.Event()
 
-        # ── Gateway-centric bridge / rogue-router detection ─────────────
+        # ── Gateway-centric bridge / rogue-router detection ──────────────
         # Primary network gateway MAC — learned from ARP traffic.
         self._primary_gw_mac: str = ""
         self._primary_gw_ip:  str = ""
@@ -457,7 +458,7 @@ class NetworkScannerApp(ctk.CTk):
                 entry = {f: rec[f] for f in _br_fields if f in rec}
                 entry['known_ips']      = list(rec.get('known_ips', []))
                 entry['forwarded_macs'] = list(rec.get('forwarded_macs', []))
-                # ttl_drops is a list of 2-tuples → list of lists is fine
+                # ttl_drops is a list of 2-tuples — list of lists serialises fine
                 serialisable_suspects[mac] = entry
 
             payload = {
@@ -661,7 +662,7 @@ class NetworkScannerApp(ctk.CTk):
             command=self._export_csv)
         self.export_button.pack(side="left", padx=5)
 
-        # Interface selector (placed in its own row below the top bar)
+        # Interface selector row
         self._build_iface_row(tab)
 
         tree_frame = ctk.CTkFrame(tab, fg_color="transparent")
@@ -710,8 +711,8 @@ class NetworkScannerApp(ctk.CTk):
 
     def _build_iface_row(self, parent):
         """
-        Interface selector row.  Shows a multi-select listbox populated by
-        _list_interfaces().  The default-gateway interface is pre-selected.
+        Interface selector row. Shows a dropdown populated by _list_interfaces().
+        The default-gateway interface is pre-selected.
         """
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 4))
@@ -720,7 +721,6 @@ class NetworkScannerApp(ctk.CTk):
                      text_color=_C['text_pri']).pack(
             side="left", padx=(10, 6))
 
-        # OptionMenu / dropdown for single selection (simplest cross-platform UI)
         self._iface_list = _list_interfaces()
         iface_labels = [t[2] for t in self._iface_list]
 
@@ -758,8 +758,8 @@ class NetworkScannerApp(ctk.CTk):
     def _on_iface_changed(self, label: str):
         """
         Called whenever the user picks a different interface from the dropdown.
-        If monitoring is already active, triggers a clean stop→restart so the
-        new interface takes effect immediately without zombie threads.
+        If monitoring is already active, triggers a clean stop → restart so
+        the new interface takes effect immediately without zombie threads.
         """
         match = next((t for t in self._iface_list if t[2] == label), None)
         if match:
@@ -860,9 +860,10 @@ class NetworkScannerApp(ctk.CTk):
                 f.write("IP,MAC,Hostname,Vendor,OS,Status,Uptime\n")
                 for data in self.device_first_seen.values():
                     uptime = self.calculate_uptime(data['start_time'])
+                    # Wrap fields in quotes to handle commas in vendor/hostname
                     row = (
-                        f"{data['ip']},{data['mac']},{data['hostname']},"
-                        f"{data['vendor']},{data['os']},{data['status']},{uptime}\n"
+                        f"\"{data['ip']}\",\"{data['mac']}\",\"{data['hostname']}\","
+                        f"\"{data['vendor']}\",\"{data['os']}\",\"{data['status']}\",\"{uptime}\"\n"
                     )
                     f.write(row)
             self.status_label.configure(text=f"Exported to {out}")
@@ -874,6 +875,7 @@ class NetworkScannerApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════
 
     def is_private_mac(self, mac: str) -> bool:
+        """Return True if the MAC address has the locally-administered bit set."""
         if not mac:
             return False
         try:
@@ -882,49 +884,97 @@ class NetworkScannerApp(ctk.CTk):
             return False
 
     def detect_os(self, ip: str, vendor: str, hostname: str, mac: str) -> str:
+        """
+        Best-effort OS detection using hostname keywords, vendor OUI,
+        and ICMP TTL probing.
+
+        For devices with randomised (private) MACs — common on Android 10+
+        and iOS 14+ — we skip the early-return and always fall through to
+        the ICMP TTL probe so we get a real answer instead of leaving the
+        device stuck on 'Unknown (awaiting DHCP)' forever.
+        The DHCP sniffer will later upgrade the label if it catches a
+        DISCOVER/REQUEST with a higher-confidence fingerprint.
+        """
         try:
+            # ── Hostname keyword hints ────────────────────────────────────
             for kw in ('Samsung', 'Galaxy', 'Redmi', 'Xiaomi', 'Android'):
                 if kw.lower() in hostname.lower():
                     return "Android"
 
+            # ── Gateway shortcut ──────────────────────────────────────────
             if ip.endswith(".1"):
                 return "Router / Gateway"
 
-            if "Apple" in vendor:
-                return "iOS / macOS"
-            if vendor in ("Samsung", "Xiaomi", "Huawei"):
-                return "Android"
-            if any(x in vendor for x in ("Intel", "Dell", "HP", "Lenovo", "ASUS")):
-                return "Windows / Linux"
+            # ── Vendor OUI hints (only for non-private MACs) ──────────────
+            if not self.is_private_mac(mac):
+                if "Apple" in vendor:
+                    return "iOS / macOS"
+                if vendor in ("Samsung", "Xiaomi", "Huawei"):
+                    return "Android"
+                if any(x in vendor for x in ("Intel", "Dell", "HP", "Lenovo", "ASUS")):
+                    return "Windows / Linux"
 
-            # Private MAC → defer to DHCP fingerprinting
-            if vendor == "Private MAC (Mobile)" and self.is_private_mac(mac):
-                return "Unknown (awaiting DHCP)"
-
+            # ── ICMP TTL probe ────────────────────────────────────────────
+            # Used for ALL devices, including private-MAC mobiles.
+            # TTL ≤ 64  → Linux / Android / iOS  (default TTL = 64)
+            # TTL ≤ 128 → Windows               (default TTL = 128)
+            # TTL > 128 → Network device / router (default TTL = 255)
             resp = sr1(IP(dst=ip) / ICMP(), timeout=1, verbose=0)
             if resp:
                 ttl = resp.getlayer(IP).ttl
-                if ttl <= 64:
-                    return f"Linux / Android (TTL:{ttl})"
-                elif ttl <= 128:
-                    return f"Windows (TTL:{ttl})"
+                if self.is_private_mac(mac):
+                    # Private MACs are almost exclusively mobile OSes.
+                    # Distinguish iOS vs Android by TTL: both start at 64,
+                    # but iOS devices frequently block ICMP — if we DO get a
+                    # reply at TTL ≤ 64 it is most likely Android.
+                    if ttl <= 64:
+                        return f"Android / iOS (TTL:{ttl})"
+                    elif ttl <= 128:
+                        # Unusual for a mobile, but possible (Windows hotspot
+                        # sharing, etc.)
+                        return f"Mobile / Windows (TTL:{ttl})"
+                    else:
+                        return f"Network Device (TTL:{ttl})"
                 else:
-                    return f"Network Device (TTL:{ttl})"
+                    if ttl <= 64:
+                        return f"Linux / Android (TTL:{ttl})"
+                    elif ttl <= 128:
+                        return f"Windows (TTL:{ttl})"
+                    else:
+                        return f"Network Device (TTL:{ttl})"
+
+            # ── No ICMP reply ─────────────────────────────────────────────
+            # Private-MAC device that blocks pings → could be iOS (strict
+            # firewall) or any hardened mobile.  Mark as Mobile until DHCP
+            # fingerprinting gives us something better.
+            if self.is_private_mac(mac):
+                return "Mobile (iOS likely — awaiting DHCP)"
 
             return "OS Hidden (Firewall)"
         except Exception:
             return "Detection Failed"
 
     def get_vendor(self, mac: str) -> str:
+        """
+        Resolve vendor name from OUI. Uses an in-memory cache to avoid
+        repeated API calls for the same MAC during a session.
+        """
         if not mac:
             return "Unknown"
+
         mac_up = mac.upper()
+
+        # Return cached result immediately if available
+        if mac_up in _vendor_cache:
+            return _vendor_cache[mac_up]
+
         try:
             first_octet = int(mac_up.split(":")[0], 16)
         except Exception:
             return "Unknown"
 
         if first_octet & 0b10:
+            _vendor_cache[mac_up] = "Private MAC (Mobile)"
             return "Private MAC (Mobile)"
 
         oui = ":".join(mac_up.split(":")[:3])
@@ -934,6 +984,7 @@ class NetworkScannerApp(ctk.CTk):
             "BC:92:6B": "Huawei",  "F4:8C:50": "Huawei",
         }
         if oui in manual:
+            _vendor_cache[mac_up] = manual[oui]
             return manual[oui]
 
         try:
@@ -942,12 +993,16 @@ class NetworkScannerApp(ctk.CTk):
             if r.status_code == 200:
                 d = r.json()
                 if d.get('found') and d.get('company'):
+                    _vendor_cache[mac_up] = d['company']
                     return d['company']
         except Exception:
             pass
+
+        _vendor_cache[mac_up] = "Unknown Vendor"
         return "Unknown Vendor"
 
     def get_hostname(self, ip: str) -> str:
+        """Reverse-DNS lookup with a short timeout to avoid blocking the scan loop."""
         try:
             socket.setdefaulttimeout(0.5)
             return socket.gethostbyaddr(ip)[0]
@@ -955,6 +1010,7 @@ class NetworkScannerApp(ctk.CTk):
             return "Hidden/Unknown"
 
     def calculate_uptime(self, start_time: float) -> str:
+        """Return elapsed time since start_time as HH:MM:SS."""
         e = int(time.time() - start_time)
         h, r = divmod(e, 3600)
         m, s = divmod(r, 60)
@@ -965,6 +1021,7 @@ class NetworkScannerApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════
 
     def _resolve_ifaces(self) -> list:
+        """Determine which interfaces to use and print a startup summary."""
         ifaces = self._selected_ifaces or [_detect_gateway_interface()]
         print("=" * 60)
         print("[Ghost Sentinel] Starting monitoring session")
@@ -980,6 +1037,7 @@ class NetworkScannerApp(ctk.CTk):
         return ifaces
 
     def stop_scanning(self, *, clear_devices: bool = True):
+        """Signal all scan threads to stop and wait for them to exit."""
         print("[Ghost Sentinel] stop_scanning() called")
         self.monitoring = False
         self._stop_event.set()
@@ -994,6 +1052,7 @@ class NetworkScannerApp(ctk.CTk):
                           f"did not exit within {TIMEOUT} s — continuing.")
         self._scan_threads.clear()
 
+        # Reset events for the next session
         self._stop_event = threading.Event()
         self._scan_wake.clear()
 
@@ -1007,6 +1066,7 @@ class NetworkScannerApp(ctk.CTk):
         print("[Ghost Sentinel] All scan threads stopped.")
 
     def start_scanning(self):
+        """Start all background threads for a new monitoring session."""
         if self.monitoring:
             self.stop_scanning(clear_devices=False)
 
@@ -1054,6 +1114,7 @@ class NetworkScannerApp(ctk.CTk):
         print(f"[Ghost Sentinel] {len(threads)} threads started.")
 
     def refresh_scan(self):
+        """Stop the current session and immediately start a fresh one."""
         print("[Ghost Sentinel] refresh_scan() — stopping old session…")
         self.after(0, lambda: self.status_label.configure(text="Restarting scan…"))
         self.after(0, lambda: self.refresh_button.configure(state="disabled"))
@@ -1069,7 +1130,7 @@ class NetworkScannerApp(ctk.CTk):
         self.start_scanning()
 
     def continuous_scan(self, network: str):
-        """Adaptive ARP scan loop.  Backs off during active spoof sessions."""
+        """Adaptive ARP scan loop. Backs off during active spoof sessions."""
         while self.monitoring and not self._stop_event.is_set():
             self.scan_network(network)
             interval = 5 if self._active_session_exists() else 3
@@ -1080,7 +1141,29 @@ class NetworkScannerApp(ctk.CTk):
         s = self._spoof_sessions.get(ip)
         return s is not None and s['status'] == 'blocking'
 
+    def _os_probe_worker(self, key: str, ip: str, vendor: str,
+                         hostname: str, mac: str):
+        """
+        Run OS detection in a dedicated thread so it never blocks the ARP
+        sweep loop. Updates the device record and refreshes the UI when done.
+        """
+        if key not in self.device_first_seen:
+            return
+        result = self.detect_os(ip, vendor, hostname, mac)
+        if key in self.device_first_seen:
+            d = self.device_first_seen[key]
+            if d.get('os_confidence', 0) < 70:
+                d['os'] = result
+            self.after(0, self.update_table)
+
     def scan_network(self, network: str):
+        """
+        Perform one ARP sweep of the target network range.
+
+        Kept deliberately fast — no blocking ICMP/DNS/API calls inside the
+        loop. OS detection is dispatched to a short-lived background thread
+        per new (or stale) device so it never causes Offline false-positives.
+        """
         try:
             iface  = self._active_ifaces[0] if getattr(self, '_active_ifaces', []) else None
             kwargs = {'timeout': 0.5, 'verbose': 0}
@@ -1107,29 +1190,51 @@ class NetworkScannerApp(ctk.CTk):
                 key      = hostname if hostname != "Hidden/Unknown" else ip
 
                 if key not in self.device_first_seen:
+                    # Register immediately as Online with placeholder OS
                     self.device_first_seen[key] = {
                         'ip':            ip,
                         'mac':           mac,
                         'vendor':        vendor,
                         'hostname':      hostname,
                         'start_time':    time.time(),
-                        'os':            self.detect_os(ip, vendor, hostname, mac),
+                        'os':            'Detecting…',
                         'os_confidence': 0,
                         'status':        'Online',
                     }
+                    threading.Thread(
+                        target=self._os_probe_worker,
+                        args=(key, ip, vendor, hostname, mac),
+                        name=f"ghost-os-{ip}",
+                        daemon=True,
+                    ).start()
+
                 else:
                     d = self.device_first_seen[key]
                     d.update(status='Online', ip=ip, mac=mac,
                              vendor=vendor, hostname=hostname)
-                    if d.get('os_confidence', 0) < 70:
-                        cur    = d['os']
-                        _stale = ('OS Hidden (Firewall)', 'Detection Failed',
-                                  'Unknown (awaiting DHCP)')
-                        if 'TTL' in cur or cur in _stale:
-                            d['os'] = self.detect_os(ip, vendor, hostname, mac)
+
+                    _stale = (
+                        'Detecting…',
+                        'OS Hidden (Firewall)',
+                        'Detection Failed',
+                        'Unknown (awaiting DHCP)',
+                        'Mobile (iOS likely — awaiting DHCP)',
+                    )
+                    needs_probe = (
+                        d.get('os_confidence', 0) < 70
+                        and ('TTL' in d.get('os', '') or d.get('os') in _stale)
+                    )
+                    if needs_probe:
+                        threading.Thread(
+                            target=self._os_probe_worker,
+                            args=(key, ip, vendor, hostname, mac),
+                            name=f"ghost-os-{ip}",
+                            daemon=True,
+                        ).start()
 
                 current_keys.add(key)
 
+            # Mark any device not seen in this sweep as Offline
             for key, d in self.device_first_seen.items():
                 if key not in current_keys and not self._is_blocked(d['ip']):
                     d['status'] = 'Offline'
@@ -1141,9 +1246,14 @@ class NetworkScannerApp(ctk.CTk):
             err_msg = f"Scan Error: {type(e).__name__}: {e}"
             self.after(0, lambda: self.status_label.configure(text=err_msg))
 
+
     # ── DHCP sniffer ───────────────────────────────────────────────────────
 
     def dhcp_packet_handler(self, packet):
+        """
+        Passive DHCP fingerprinting: extract the parameter-request-list option
+        and update the device OS field if confidence is high enough.
+        """
         try:
             if not (packet.haslayer('DHCP') and packet.haslayer('IP')):
                 return
@@ -1199,6 +1309,10 @@ class NetworkScannerApp(ctk.CTk):
     }
 
     def _baseline_ttl_for_mac(self, mac: str) -> int:
+        """
+        Return the expected initial TTL for a known device by MAC address.
+        Returns 0 if the device is not in the known-device table.
+        """
         mac_l = mac.lower()
         for data in self.device_first_seen.values():
             if data.get('mac', '').lower() == mac_l:
@@ -1210,6 +1324,10 @@ class NetworkScannerApp(ctk.CTk):
         return 0
 
     def _ensure_suspect(self, mac: str, now: float) -> dict:
+        """
+        Return the bridge-suspect record for mac, creating it if absent.
+        Metadata (vendor, hostname) is populated from device_first_seen when available.
+        """
         if mac not in self.bridge_suspects:
             meta = next(
                 (d for d in self.device_first_seen.values()
@@ -1230,6 +1348,7 @@ class NetworkScannerApp(ctk.CTk):
         return self.bridge_suspects[mac]
 
     def _refresh_suspect_meta(self, rec: dict):
+        """Sync vendor / hostname from the live device table into a suspect record."""
         mac_l = rec['suspect_mac'].lower()
         meta = next(
             (d for d in self.device_first_seen.values()
@@ -1239,6 +1358,7 @@ class NetworkScannerApp(ctk.CTk):
             rec['hostname'] = meta.get('hostname', rec['hostname'])
 
     def _score_suspect(self, rec: dict) -> str:
+        """Compute a confidence level (Low / Medium / High) for a suspect record."""
         arp_hits = rec.get('arp_spoof_count', 0)
         ttl_hits = len(rec.get('ttl_drops', []))
         clients  = len(rec.get('forwarded_macs', set()))
@@ -1249,6 +1369,7 @@ class NetworkScannerApp(ctk.CTk):
         return 'Low'
 
     def _build_reason(self, rec: dict) -> str:
+        """Build a human-readable reason string from a suspect record's evidence."""
         parts = []
         if rec.get('arp_spoof_count', 0):
             parts.append(f"ARP hijack ×{rec['arp_spoof_count']}")
@@ -1259,17 +1380,23 @@ class NetworkScannerApp(ctk.CTk):
         return ", ".join(parts) if parts else "Suspected bridge"
 
     def _arp_handler(self, packet):
+        """
+        Process a captured ARP reply.
+        - Learn the primary gateway MAC from .1 addresses.
+        - Flag any device that claims an IP already owned by a different MAC.
+        """
         try:
             if not packet.haslayer(ARP):
                 return
             arp = packet[ARP]
-            if arp.op != 2:
+            if arp.op != 2:   # only process ARP replies
                 return
 
             sender_ip  = arp.psrc
             sender_mac = arp.hwsrc.lower()
             now = time.time()
 
+            # Gateway learning / spoofing detection
             if sender_ip.endswith('.1') or sender_ip == self._primary_gw_ip:
                 if not self._primary_gw_mac:
                     self._primary_gw_mac = sender_mac
@@ -1288,6 +1415,7 @@ class NetworkScannerApp(ctk.CTk):
                     self.after(0, self._update_insights_table)
                 return
 
+            # Non-gateway ARP conflict detection
             known_mac_for_ip = next(
                 (d.get('mac', '').lower()
                  for d in self.device_first_seen.values()
@@ -1307,6 +1435,11 @@ class NetworkScannerApp(ctk.CTk):
             pass
 
     def _ip_ttl_handler(self, packet):
+        """
+        Detect bridge / MITM devices by observing TTL−1 forwarding.
+        If a known device's packet arrives with a TTL exactly one less than
+        its OS baseline, it has been forwarded through an intermediate host.
+        """
         try:
             if not (packet.haslayer(IP) and packet.haslayer(Ether)):
                 return
@@ -1316,21 +1449,25 @@ class NetworkScannerApp(ctk.CTk):
             src_ip  = packet[IP].src
             ttl_obs = packet[IP].ttl
 
+            # Ignore multicast, broadcast, and loopback
             if (src_ip.startswith('224.') or src_ip.startswith('239.')
                     or src_ip.startswith('255.') or src_ip == '127.0.0.1'
                     or src_mac == 'ff:ff:ff:ff:ff:ff'):
                 return
 
+            # Only analyse traffic from devices we have already seen
             known_macs = {d.get('mac', '').lower()
                           for d in self.device_first_seen.values()}
             if src_mac not in known_macs:
                 return
 
+            # Skip the primary gateway — it legitimately decrements TTL
             if src_mac == self._primary_gw_mac:
                 return
 
             ttl_exp = self._baseline_ttl_for_mac(src_mac)
             if ttl_exp == 0:
+                # No OS baseline known — use common decremented values as a hint
                 if ttl_obs not in (63, 127, 254):
                     return
                 ttl_exp = ttl_obs + 1
@@ -1345,7 +1482,7 @@ class NetworkScannerApp(ctk.CTk):
             rec['last_seen'] = now
 
             rec['ttl_drops'].append((ttl_obs, ttl_exp))
-            if len(rec['ttl_drops']) > 50:
+            if len(rec['ttl_drops']) > 50:   # keep rolling window bounded
                 rec['ttl_drops'] = rec['ttl_drops'][-50:]
 
             if dst_mac and dst_mac != self._primary_gw_mac:
@@ -1360,6 +1497,11 @@ class NetworkScannerApp(ctk.CTk):
             pass
 
     def start_hotspot_sniffer(self):
+        """
+        Passive bridge-detection loop.
+        Alternates between ARP sniffing and IP/TTL sniffing in 2-second bursts
+        so that the stop-event is checked frequently enough to exit cleanly.
+        """
         ifaces     = getattr(self, '_active_ifaces', None) or None
         stop_event = self._stop_event
         self.after(0, lambda: self.insights_status.configure(
@@ -1379,6 +1521,7 @@ class NetworkScannerApp(ctk.CTk):
             text="Monitoring stopped."))
 
     def _clear_bridge_suspects(self):
+        """Clear all bridge-suspect records and reset the learned gateway info."""
         self.bridge_suspects.clear()
         self._primary_gw_mac = ""
         self._primary_gw_ip  = ""
@@ -1387,6 +1530,7 @@ class NetworkScannerApp(ctk.CTk):
         self._save_devices()
 
     def _update_insights_table(self):
+        """Rebuild the Advanced Insights treeview from bridge_suspects."""
         for item in self.insights_tree.get_children():
             self.insights_tree.delete(item)
 
@@ -1428,6 +1572,7 @@ class NetworkScannerApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════
 
     def _log(self, message: str):
+        """Append a timestamped line to the Network Control activity log."""
         ts = time.strftime("%H:%M:%S")
         self.spoof_log.configure(state="normal")
         self.spoof_log.insert("end", f"[{ts}]  {message}\n")
@@ -1435,12 +1580,14 @@ class NetworkScannerApp(ctk.CTk):
         self.spoof_log.configure(state="disabled")
 
     def _get_mac(self, ip: str):
+        """Resolve an IP address to its MAC via ARP. Returns None on failure."""
         ans, _ = arping(ip, timeout=2, verbose=0)
         for _, r in ans:
             return r[Ether].src
         return None
 
     def _active_session_exists(self) -> bool:
+        """Return True if any spoof session is currently blocking or restoring."""
         for s in self._spoof_sessions.values():
             if s['status'] in ('blocking', 'restoring'):
                 return True
@@ -1450,6 +1597,7 @@ class NetworkScannerApp(ctk.CTk):
         return False
 
     def _sync_block_buttons(self):
+        """Enable / disable block buttons to reflect the current session state."""
         active = self._active_session_exists()
         self.block_button.configure(state="disabled" if active else "normal")
         self.unblock_button.configure(state="normal")
@@ -1459,6 +1607,11 @@ class NetworkScannerApp(ctk.CTk):
 
     def arp_spoof(self, target_ip: str, gateway_ip: str,
                   stop_event: threading.Event):
+        """
+        Continuously send forged ARP replies to both the target and the gateway,
+        intercepting traffic in both directions until stop_event is set.
+        Automatically calls restore_network() before exiting.
+        """
         session = self._spoof_sessions[target_ip]
 
         target_mac  = self._get_mac(target_ip)
@@ -1486,6 +1639,7 @@ class NetworkScannerApp(ctk.CTk):
         self.after(0, lambda: self._log(
             "Spoofing active — target internet access is now blocked."))
 
+        # Craft forged ARP replies for both directions
         pkt_to_target = Ether(dst=target_mac) / ARP(
             op=2, pdst=target_ip, hwdst=target_mac, psrc=gateway_ip)
         pkt_to_gateway = Ether(dst=gateway_mac) / ARP(
@@ -1508,6 +1662,11 @@ class NetworkScannerApp(ctk.CTk):
 
     def restore_network(self, target_ip: str, target_mac: str,
                          gateway_ip: str, gateway_mac: str):
+        """
+        Send corrective ARP replies to both the target and the gateway,
+        restoring their real MAC ↔ IP mappings after a spoof session ends.
+        Sends 5 gratuitous packets with 400 ms spacing for reliability.
+        """
         pkt_fix_target = Ether(dst=target_mac) / ARP(
             op=2,
             pdst=target_ip,  hwdst=target_mac,
@@ -1527,6 +1686,7 @@ class NetworkScannerApp(ctk.CTk):
             "Network restored. Target has internet access again."))
 
     def start_block(self):
+        """Validate inputs and launch an ARP spoof session against the target IP."""
         target_ip  = self.target_ip_entry.get().strip()
         gateway_ip = self.gateway_ip_entry.get().strip()
 
@@ -1561,6 +1721,11 @@ class NetworkScannerApp(ctk.CTk):
         self._sync_block_buttons()
 
     def stop_block(self):
+        """
+        Signal the active spoof session(s) to stop.
+        If a specific IP is in the target field, only that session is stopped;
+        otherwise all active sessions are stopped.
+        """
         target_ip = self.target_ip_entry.get().strip()
 
         if target_ip and target_ip in self._spoof_sessions:
@@ -1581,6 +1746,7 @@ class NetworkScannerApp(ctk.CTk):
                 self._log(f"Unblock requested for {ip} — signalling thread…")
                 session['stop_event'].set()
 
+            # Optimistically mark device as Online in the UI
             for data in self.device_first_seen.values():
                 if data['ip'] == ip and data['status'] == 'Blocked':
                     data['status'] = 'Online'
@@ -1590,6 +1756,7 @@ class NetworkScannerApp(ctk.CTk):
         self.after(0, self._sync_block_buttons)
 
         def _cleanup(snapshot):
+            """Wait for spoof threads to exit; force-restore if they hang."""
             for ip, session in snapshot:
                 thread = session.get('thread')
                 if thread and thread.is_alive():
@@ -1616,48 +1783,42 @@ class NetworkScannerApp(ctk.CTk):
         ]
         threading.Thread(target=_cleanup, args=(snapshot,), daemon=True).start()
 
-    
-
     def _on_close(self):
         """
-       quick cleanup: signal all threads to stop, restore any active blocks, save data, and exit."""
-        print("[Ghost Sentinel] Quick cleanup initiated...")
+        Window close handler.
+        Signals all threads to stop, synchronously restores any active ARP
+        spoof sessions so no device is left blocked, saves state, then exits.
+        """
+        print("[Ghost Sentinel] Shutdown initiated…")
 
-        
+        # 1. Stop all scan threads
         self.monitoring = False
         self._stop_event.set()
         self._scan_wake.set()
 
-       
-       
-        active_ips = list(self._spoof_sessions.keys())
-        for ip in active_ips:
-            session = self._spoof_sessions[ip]
+        # 2. Restore any active spoof sessions immediately (no thread.join needed
+        #    because we call restore_network directly from this thread)
+        for ip, session in self._spoof_sessions.items():
             if session['status'] in ('blocking', 'restoring'):
-                print(f"[Ghost Sentinel] Fast restoring {ip}...")
-                
+                print(f"[Ghost Sentinel] Restoring ARP for {ip}…")
                 session['stop_event'].set()
-                
-                
                 t_mac = session.get('target_mac')
                 g_ip  = session.get('gateway_ip')
                 g_mac = session.get('gateway_mac')
                 if t_mac and g_ip and g_mac:
                     try:
-                        # بننادي دالة الريستور مباشرة هنا عشان ننجز
                         self.restore_network(ip, t_mac, g_ip, g_mac)
-                    except:
+                    except Exception:
                         pass
 
-        # 3. حفظ البيانات
+        # 3. Persist device and suspect data
         self._save_devices()
         print("[Ghost Sentinel] Shutdown complete.")
         self.destroy()
-        
-        import sys
         sys.exit(0)
 
     def update_table(self):
+        """Rebuild the Scanner treeview from device_first_seen."""
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -1677,12 +1838,14 @@ class NetworkScannerApp(ctk.CTk):
             text=f"Monitoring active — {len(self.device_first_seen)} devices tracked.")
 
     def uptime_updater(self):
+        """Background thread: tick uptime column every second."""
         stop_event = self._stop_event
         while self.monitoring and not stop_event.is_set():
             self.after(0, self.update_uptimes)
             stop_event.wait(timeout=1)
 
     def update_uptimes(self):
+        """Update only the uptime column for all visible rows (avoids full table rebuild)."""
         for data in self.device_first_seen.values():
             if 'iid' in data:
                 vals    = list(self.tree.item(data['iid'], 'values'))
@@ -1690,20 +1853,18 @@ class NetworkScannerApp(ctk.CTk):
                 self.tree.item(data['iid'], values=vals)
 
 
-
+# ══════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
+# ══════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-
-    
-    
     if not _is_admin():
         want_restart = _show_privilege_dialog()
         if want_restart:
-            
             _restart_as_admin()
         else:
-            
             sys.exit(0)
+
     app = NetworkScannerApp()
     try:
         app.mainloop()
