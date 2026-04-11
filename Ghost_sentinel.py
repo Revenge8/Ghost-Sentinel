@@ -1381,56 +1381,74 @@ class NetworkScannerApp(ctk.CTk):
 
     def _arp_handler(self, packet):
         """
-        Process a captured ARP reply.
-        - Learn the primary gateway MAC from .1 addresses.
-        - Flag any device that claims an IP already owned by a different MAC.
+        Process captured ARP packets.
+        - Learn the primary gateway MAC on first sighting.
+        - Flag any device claiming the gateway IP with a different MAC.
+        - Flag any device claiming a known IP with a different MAC.
         """
         try:
             if not packet.haslayer(ARP):
                 return
-            arp = packet[ARP]
-            if arp.op != 2:   # only process ARP replies
+ 
+            arp        = packet[ARP]
+            if arp.op != 2:  # Only process ARP Replies
                 return
-
+ 
             sender_ip  = arp.psrc
             sender_mac = arp.hwsrc.lower()
-            now = time.time()
-
-            # Gateway learning / spoofing detection
-            if sender_ip.endswith('.1') or sender_ip == self._primary_gw_ip:
+            now        = time.time()
+            is_garp    = (sender_ip == arp.pdst)
+ 
+            # ── Gateway learning / spoofing detection ─────────────────────
+            is_gateway_ip = bool(self._primary_gw_ip) and (sender_ip == self._primary_gw_ip)
+ 
+            if is_gateway_ip:
                 if not self._primary_gw_mac:
+                    # First time — learn the real gateway MAC
                     self._primary_gw_mac = sender_mac
                     self._primary_gw_ip  = sender_ip
                     self.after(0, lambda: self.gw_info_label.configure(
                         text=f"{self._primary_gw_ip}  ({self._primary_gw_mac.upper()})"))
                     return
                 if sender_mac != self._primary_gw_mac:
+                    # Different MAC claiming to be the gateway — flag it
                     rec = self._ensure_suspect(sender_mac, now)
                     rec['known_ips'].add(sender_ip)
                     rec['arp_spoof_count'] += 1
                     rec['last_seen'] = now
+                    if is_garp:
+                        rec['reason'] = "Detected Rogue Gateway via Gratuitous ARP"
+                    else:
+                        rec['reason'] = "MAC conflict for Primary Gateway IP"
                     self._refresh_suspect_meta(rec)
                     rec['confidence'] = self._score_suspect(rec)
-                    rec['reason']     = self._build_reason(rec)
                     self.after(0, self._update_insights_table)
                 return
-
-            # Non-gateway ARP conflict detection
+ 
+            # ── .1 heuristic fallback (only if gateway not yet learned) ───
+            if not self._primary_gw_mac and sender_ip.endswith('.1'):
+                self._primary_gw_mac = sender_mac
+                self._primary_gw_ip  = sender_ip
+                self.after(0, lambda: self.gw_info_label.configure(
+                    text=f"{self._primary_gw_ip}  ({self._primary_gw_mac.upper()})"))
+                return
+ 
+            # ── Non-gateway ARP conflict detection ────────────────────────
             known_mac_for_ip = next(
                 (d.get('mac', '').lower()
                  for d in self.device_first_seen.values()
                  if d.get('ip') == sender_ip), None)
-
+ 
             if known_mac_for_ip and known_mac_for_ip != sender_mac:
                 rec = self._ensure_suspect(sender_mac, now)
                 rec['known_ips'].add(sender_ip)
                 rec['arp_spoof_count'] += 1
                 rec['last_seen'] = now
+                rec['reason'] = "MAC conflict for known device IP"
                 self._refresh_suspect_meta(rec)
                 rec['confidence'] = self._score_suspect(rec)
-                rec['reason']     = self._build_reason(rec)
                 self.after(0, self._update_insights_table)
-
+ 
         except Exception:
             pass
 
@@ -1659,14 +1677,8 @@ class NetworkScannerApp(ctk.CTk):
             f"Session for {target_ip} is now idle. Network restored."))
         self.after(0, self._sync_block_buttons)
         self.after(0, self._save_devices)
-
     def restore_network(self, target_ip: str, target_mac: str,
-                         gateway_ip: str, gateway_mac: str):
-        """
-        Send corrective ARP replies to both the target and the gateway,
-        restoring their real MAC ↔ IP mappings after a spoof session ends.
-        Sends 5 gratuitous packets with 400 ms spacing for reliability.
-        """
+                     gateway_ip: str, gateway_mac: str):
         pkt_fix_target = Ether(dst=target_mac) / ARP(
             op=2,
             pdst=target_ip,  hwdst=target_mac,
@@ -1677,13 +1689,35 @@ class NetworkScannerApp(ctk.CTk):
             pdst=gateway_ip,  hwdst=gateway_mac,
             psrc=target_ip,   hwsrc=target_mac,
         )
+
+        extra_packets = []
+        for data in self.device_first_seen.values():
+            ip  = data.get('ip')
+            mac = data.get('mac')
+            if ip and mac and ip not in (target_ip, gateway_ip):
+                extra_packets.append(Ether(dst=mac) / ARP(
+                    op=2,
+                    pdst=ip,  hwdst=mac,
+                    psrc=gateway_ip, hwsrc=gateway_mac,
+                ))
+
+        pkt_broadcast = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(
+        op=2,
+        pdst="255.255.255.255",
+        hwdst="ff:ff:ff:ff:ff:ff",
+        psrc=gateway_ip,
+        hwsrc=gateway_mac,        
+        )
         for _ in range(5):
             sendp(pkt_fix_target,  verbose=0)
             sendp(pkt_fix_gateway, verbose=0)
+            for pkt in extra_packets:
+                sendp(pkt, verbose=0)
             time.sleep(0.4)
 
         self.after(0, lambda: self._log(
-            "Network restored. Target has internet access again."))
+            f"Network restored. Corrective ARP sent to "
+            f"{len(extra_packets) + 2} devices."))
 
     def start_block(self):
         """Validate inputs and launch an ARP spoof session against the target IP."""
