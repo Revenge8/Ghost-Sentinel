@@ -12,6 +12,11 @@ In this version, I focused on hardening the core engine and solving network pers
 * **Security Audited:** The entire codebase (1500+ lines) has been scanned using **Bandit Static Analysis**. Fixed potential subprocess vulnerabilities and improved exception handling.
 * **Optimized Performance:** Refined packet-sending frequency to maintain stability and prevent unintended network congestion (DoS).
 
+
+##⚠️ Important Note for Existing Users:
+If you are upgrading from a pre-release version, please manually delete the ghost_sentinel_data.json file before running v1.0 to avoid database conflicts and ensure the new security logic applies correctly.
+
+
 ## 🚀 Key Features
 * **Rogue Gateway Detection:** Identifies unauthorized routers or gateways within the network.
 * **ARP Spoofing Protection:** Monitors for suspicious ARP behavior to prevent MITM attacks.
