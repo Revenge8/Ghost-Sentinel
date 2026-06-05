@@ -652,7 +652,7 @@ Unauthorized scanning, interception, or traffic manipulation may violate compute
 
 License
 
-Specify your license here (e.g., MIT, GPL-3.0) before public distribution.
+Distributed under the MIT License. See `LICENSE` for more information.
 
 Contributing
 
