@@ -30,22 +30,40 @@ Ghost Sentinel answers a practical question: **who is on my network right now, w
 
 At runtime, the application follows a layered pipeline:
 
+<p align="center">
+  <img src="Network_Interface.png" width="80%" alt="Network Bar Overview">
+</p>
 
 
 ┌─────────────────────────────────────────────────────────────────────┐ │ main.py (Tkinter GUI) │ │ Interface selection │ Live scan │ Sniffer │ Attack │ History │ └────────────┬──────────────────┬──────────────────┬──────────────────┘ │ │ │ v v v ┌─────────────────┐ ┌───────────────┐ ┌──────────────────┐ │ core_scanner.py │ │core_sniffer.py│ │ core_attacker.py │ │ ARP discovery │ │ Passive DHCP/ │ │ ARP spoof/block │ │ + enrichment │ │ ARP analysis │ │ + ARP restore │ └────────┬────────┘ └───────┬───────┘ └────────┬─────────┘ │ │ │ v v v ┌────────────────────────────────────────────────────────────┐ │ fingerprint/ (OS & device inference) │ │ engine.py │ lookup.py │ evidence.py │ mac.py │ os_intel.py│ └────────────────────────────┬───────────────────────────────┘ │ v ┌────────────────────────────────────────────────────────────┐ │ utils/ (network context, iface resolution, vendor lookup) │ │ network_helper.py │ scapy_iface.py │ extract.py │ └────────────────────────────┬───────────────────────────────┘ │ v ┌────────────────────────────────────────────────────────────┐ │ data/ — devices.json (inventory) + mac-vendors.txt (OUI) │ └────────────────────────────────────────────────────────────┘
+
+<br>
+<p align="center">
+  <img src="Scanner.png" width="85%" alt="Scanner Tab">
+</p>
+<br>
+
+
+<p align="center">
+  <img src="History.png" width="85%" alt="History Tab">
+</p>
 
 ### Core operational flow
 
 1. **Bootstrap** — `main.py` loads modules, restores prior device history from `data/devices.json`, detects local IP/gateway/range via `utils/network_helper.py`, and presents an interface picker (Scapy GUID on Windows, interface name on Linux/macOS).
 
 2. **Live scanning** — A background daemon thread repeatedly calls `scan_network_logic()` in `core/core_scanner.py`. The scanner performs a parallel ARP sweep across a private CIDR, enriches each responder with vendor, hostname, and OS hints, then merges results into an in-memory dictionary keyed by **MAC address** (not IP).
-
+<p align="center">
+  <img src="SNIFFER.png" width="85%" alt="Sniffer Tab">
+</p>
 3. **Passive monitoring** — A separate sniffer thread runs `start_sniffer()` from `core/core_sniffer.py`, capturing DHCP and ARP traffic. DHCP events update the device table in real time; ARP spoof replies against the known gateway trigger alerts.
 
 4. **Fingerprint refinement** — When available, `FingerprintEngine` (`fingerprint/engine.py`) upgrades weak scanner guesses using protocol-specific signatures (ARP, DHCP option 55/60, mDNS, TTL, TCP SYN, TLS JA3, and more).
 
 5. **Persistence** — After each successful sweep, and on application exit, `core/core_storage.py` atomically writes the full device list to `data/devices.json`.
-
+<p align="center">
+  <img src="Network_Control.png" width="85%" alt="Network Control Tab">
+</p>
 6. **Optional network control** — The Network Control tab invokes `run_attack()` in `core/core_attacker.py`, which performs bidirectional ARP spoofing to isolate a target host from the gateway until stopped, then restores correct ARP mappings.
 
 All long-running operations execute on **daemon threads**; the GUI updates exclusively through `self.after()` callbacks to preserve Tkinter thread safety.
@@ -550,7 +568,7 @@ Elevated privileges (Administrator / root) for scanning and sniffing
 
 1. Clone the repository
 
-git clone https://github.com/<your-org>/Ghost_sentinel.git
+git clone https://github.com/Revenge8/Ghost_sentinel.git
 
 cd Ghost_sentinel
 
@@ -634,7 +652,7 @@ Unauthorized scanning, interception, or traffic manipulation may violate compute
 
 License
 
-Specify your license here (e.g., MIT, GPL-3.0) before public distribution.
+Distributed under the MIT License. See `LICENSE` for more information.
 
 Contributing
 
