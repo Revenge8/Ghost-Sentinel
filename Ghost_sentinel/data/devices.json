@@ -1,0 +1,134 @@
+[
+    {
+        "ip": "192.168.100.1",
+        "mac": "c4:0d:96:1c:52:19",
+        "vendor": "HUAWEI TECHNOLOGIES CO.,LTD",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.14",
+        "mac": "e0:d5:5e:d7:76:1e",
+        "vendor": "GIGA-BYTE TECHNOLOGY CO.,LTD.",
+        "hostname": "0xyhrevenge",
+        "os": "Unknown",
+        "os_confidence": 0,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.158",
+        "mac": "02:17:92:02:a7:1c",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.159",
+        "mac": "6a:64:5b:79:e0:bd",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Offline",
+        "first_seen": 1780656624.4806118,
+        "last_seen": 1780656624.4806118
+    },
+    {
+        "ip": "192.168.100.162",
+        "mac": "22:ec:35:ac:48:0b",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.163",
+        "mac": "aa:9e:0f:34:9a:87",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.166",
+        "mac": "46:dc:f3:4d:8e:10",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656655.4955816,
+        "last_seen": 1780656655.4955816
+    },
+    {
+        "ip": "192.168.100.167",
+        "mac": "94:bb:43:74:8a:d7",
+        "vendor": "AzureWave Technology Inc.",
+        "hostname": "Shura-TUF",
+        "os": "Windows  (TTL 128)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.179",
+        "mac": "a0:d0:5b:53:e6:40",
+        "vendor": "Samsung Electronics Co.,Ltd",
+        "hostname": "Unknown",
+        "os": "Android",
+        "os_confidence": 85,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.128",
+        "mac": "f8:94:c2:63:ec:19",
+        "vendor": "Intel Corporate",
+        "hostname": "DESKTOP-I81NE2F",
+        "os": "Unknown",
+        "os_confidence": 0,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.160",
+        "mac": "b6:b3:15:19:55:bb",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    },
+    {
+        "ip": "192.168.100.161",
+        "mac": "26:9f:c4:4c:4f:21",
+        "vendor": "Randomized MAC (Mobile)",
+        "hostname": "Unknown",
+        "os": "Linux / Android  (TTL 64)",
+        "os_confidence": 60,
+        "status": "Online",
+        "first_seen": 1780656686.8126428,
+        "last_seen": 1780656686.8126428
+    }
+]
