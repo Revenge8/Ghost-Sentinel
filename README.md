@@ -568,7 +568,7 @@ Elevated privileges (Administrator / root) for scanning and sniffing
 
 1. Clone the repository
 
-git clone https://github.com/<your-org>/Ghost_sentinel.git
+git clone https://github.com/Revenge8/Ghost_sentinel.git
 
 cd Ghost_sentinel
 
