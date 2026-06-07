@@ -20,6 +20,7 @@ import time
 import subprocess
 import threading
 import logging
+import ipaddress
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from typing import Any
@@ -30,8 +31,10 @@ if _ROOT not in sys.path:
 
 
 def _die(module: str, extra: str = "") -> None:
+    if extra:
+        _log.error("Import failed for %s: %s", module, extra)
     msg = (f"Required module '{module}' could not be imported.\n"
-           f"Make sure the project structure is intact.\n{extra}")
+           f"Make sure the project structure is intact.")
     try:
         root = tk.Tk()
         root.withdraw()
@@ -48,7 +51,7 @@ except ImportError as e:
     _die("utils.network_helper", str(e))
 
 try:
-    from utils.scapy_iface import list_scapy_ifaces, resolve_iface
+    from utils.scapy_iface import list_scapy_ifaces, resolve_iface, sanitize_iface_hint
 except ImportError as e:
     _die("utils.scapy_iface", str(e))
 
@@ -85,6 +88,27 @@ except ImportError:
     _FP_ENGINE = None
 
 _log = logging.getLogger("ghost_sentinel")
+
+
+def _validate_ipv4(ip: str) -> bool:
+    try:
+        ipaddress.IPv4Address((ip or "").strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_cli_export_path(path: str) -> str:
+    """Reject path traversal in CLI --export mode."""
+    path = (path or "").strip()
+    if not path:
+        return "ghost_sentinel_export.csv"
+    norm = path.replace("\\", "/")
+    if ".." in norm.split("/"):
+        return "ghost_sentinel_export.csv"
+    if "\x00" in path:
+        return "ghost_sentinel_export.csv"
+    return path
 
 SCAN_INTERVAL_SEC = 25
 UI_REFRESH_MS     = 1000
@@ -819,7 +843,7 @@ class GhostSentinel(tk.Tk):
         if idx >= 0:
             # Selected from list — already handled
             return
-        typed = self._iface_combo.get().strip()
+        typed = sanitize_iface_hint(self._iface_combo.get())
         if typed:
             self.scapy_iface = typed
             self._var_scapy.set(self._short_guid(typed))
@@ -913,7 +937,7 @@ class GhostSentinel(tk.Tk):
 
         def _ok():
             # Manual entry takes priority if filled
-            manual = manual_e.get().strip()
+            manual = sanitize_iface_hint(manual_e.get())
             if manual:
                 self.scapy_iface = manual
                 self._var_scapy.set(self._short_guid(manual))
@@ -965,7 +989,8 @@ class GhostSentinel(tk.Tk):
                 f"Network detected — {info.get('ip')} on {info.get('interface')}"))
             self.after(0, self._reload_iface_combo)
         except Exception as exc:
-            self.after(0, lambda: self._set_status(f"Network detection failed: {exc}"))
+            _log.exception("network detection: %s", exc)
+            self.after(0, lambda: self._set_status("Network detection failed."))
 
     # ── Live scan ──────────────────────────────────────────────────────────────
 
@@ -1022,18 +1047,21 @@ class GhostSentinel(tk.Tk):
         while not self._stop.is_set() and self._live_scan_on:
             rng = self._range_entry.get().strip() or (self._net_info.get("range") or "")
             if not rng:
-                self._status_text = "Enter a network range"
+                with self._lock:
+                    self._status_text = "Enter a network range"
                 if self._stop.wait(timeout=3):
                     break
                 continue
 
             if not self.scapy_iface:
-                self._status_text = "Select an interface"
+                with self._lock:
+                    self._status_text = "Select an interface"
                 if self._stop.wait(timeout=3):
                     break
                 continue
 
-            self._status_text = "Scanning…"
+            with self._lock:
+                self._status_text = "Scanning…"
             self._stop_scan.clear()
             with self._lock:
                 self._scan_state.update(active=True, done=0, total=1, phase="arp_sweep")
@@ -1046,7 +1074,7 @@ class GhostSentinel(tk.Tk):
                     stop_event=self._stop_scan,
                 )
             except Exception as exc:
-                devices, err = [], str(exc)
+                devices, err = [], "Scan failed."
                 _log.exception("scan: %s", exc)
             finally:
                 with self._lock:
@@ -1056,11 +1084,13 @@ class GhostSentinel(tk.Tk):
                 break
 
             if err:
-                self._status_text = f"Error: {err}"
+                with self._lock:
+                    self._status_text = f"Error: {err}"
             else:
                 self._merge_scan_results(devices or [])
                 n = len(devices or [])
-                self._status_text = f"Live scan — {n} host(s) found"
+                with self._lock:
+                    self._status_text = f"Live scan — {n} host(s) found"
                 try:
                     with self._lock:
                         self._storage.save_devices(list(self._devices.values()))
@@ -1074,7 +1104,8 @@ class GhostSentinel(tk.Tk):
                 time.sleep(0.1)
 
         self._live_scan_on = False
-        self._status_text = "Scan stopped"
+        with self._lock:
+            self._status_text = "Scan stopped"
         self.after(0, lambda: (
             self._btn_live.config(state="normal"),
             self._btn_stop_live.config(state="disabled"),
@@ -1208,6 +1239,9 @@ class GhostSentinel(tk.Tk):
         if not target or not gw:
             messagebox.showwarning("Input", "Enter Target IP and Gateway IP.")
             return
+        if not _validate_ipv4(target) or not _validate_ipv4(gw):
+            messagebox.showwarning("Input", "Enter valid IPv4 addresses.")
+            return
         self._stop_attack.clear()
         self._attacking = True
         self._btn_atk_start.config(state="disabled")
@@ -1272,6 +1306,8 @@ class GhostSentinel(tk.Tk):
         with self._lock:
             snapshot = list(self._devices.values())
             st       = dict(self._scan_state)
+            status_text = self._status_text
+            new_macs = set(self._new_macs)
 
         snapshot.sort(key=lambda d: (d.get("status") != "Online", d.get("ip", "")))
 
@@ -1302,13 +1338,13 @@ class GhostSentinel(tk.Tk):
             tags: list[str] = ["base", st_tag]
             if i % 2 == 1:
                 tags.append("alt")
-            if dev.get("mac", "") in self._new_macs:
+            if dev.get("mac", "") in new_macs:
                 tags.append("new")
 
             self._tree.insert("", "end", values=vals, tags=tuple(tags))
 
         self._var_count.set(str(len(snapshot)))
-        self._var_status.set(self._status_text)
+        self._var_status.set(status_text)
 
         if st.get("active"):
             done  = int(st.get("done") or 0)
@@ -1407,7 +1443,8 @@ class GhostSentinel(tk.Tk):
                     ])
             self._set_status(f"Exported {len(snapshot)} devices → {path}")
         except Exception as exc:
-            messagebox.showerror("Export Failed", str(exc))
+            _log.exception("export: %s", exc)
+            messagebox.showerror("Export Failed", "Could not write export file.")
 
     def _set_status(self, msg: str):
         self._status_text = msg
@@ -1433,10 +1470,8 @@ class GhostSentinel(tk.Tk):
 
 if __name__ == "__main__":
     if "--export" in sys.argv:
-        path = (
-            sys.argv[-1] if sys.argv[-1].endswith(".csv")
-            else "ghost_sentinel_export.csv"
-        )
+        raw = sys.argv[-1] if sys.argv[-1].endswith(".csv") else "ghost_sentinel_export.csv"
+        path = _safe_cli_export_path(raw)
         st = Storage()
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f, quoting=csv.QUOTE_ALL)

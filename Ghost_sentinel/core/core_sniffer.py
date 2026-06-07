@@ -6,10 +6,21 @@ from fingerprint.engine import FingerprintEngine, make_callback
 from fingerprint.mac import is_randomized_mac, extract_correlation_signals
 import time
 import logging
+import ipaddress
 from scapy.all import sniff, DHCP, ARP, IP, Ether
 from utils.scapy_iface import resolve_iface
 
 _log = logging.getLogger(__name__)
+
+
+def _valid_ipv4(ip: str) -> bool:
+    if not ip:
+        return False
+    try:
+        ipaddress.IPv4Address(ip)
+        return True
+    except ValueError:
+        return False
 
 
 def process_dhcp_packet(packet) -> dict | None:
@@ -83,6 +94,10 @@ def start_sniffer(interface: str, stop_event, callback,
         interface = ""
     interface = resolve_iface(interface)
 
+    if gateway_ip and not _valid_ipv4(gateway_ip):
+        _log.warning("Invalid gateway_ip %r — ARP spoof detection disabled.", gateway_ip)
+        gateway_ip = ""
+
     def packet_handler(pkt):
         try:
             # 1. DHCP — device identification + signal extraction
@@ -108,7 +123,7 @@ def start_sniffer(interface: str, stop_event, callback,
                     callback('arp_spoof', spoof_info)
 
         except Exception as e:
-            _log.exception("packet_handler error: %s", e)
+            _log.debug("packet_handler error: %s", e)
 
     # Short bursts so stop_event is checked every 2 seconds
     while not stop_event.is_set():
@@ -127,6 +142,7 @@ def start_sniffer(interface: str, stop_event, callback,
             # Prevent a tight error loop if capture fails (e.g. permissions,
             # interface renamed/disconnected). Back off slightly and retry
             # until stop_event is set.
-            _log.error("sniff error: %s", e)
+            _log.error("Sniff capture error.")
+            _log.debug("sniff error: %s", e)
             if stop_event.wait(timeout=0.5):
                 break

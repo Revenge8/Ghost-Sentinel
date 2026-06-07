@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import sys, os
+import logging
+
+_log = logging.getLogger(__name__)
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -23,7 +26,7 @@ def _load():
     if _loaded:
         return
     if not _VENDORS_FILE:
-        print("[extract] WARNING: no vendor file found in data/")
+        _log.warning("No vendor file found in data/")
         _loaded = True
         return
     try:
@@ -42,9 +45,10 @@ def _load():
                         key = raw
                     _oui_cache[key] = parts[1].strip()
         _loaded = True
-        print(f"[extract] Loaded {len(_oui_cache)} OUI entries from {_VENDORS_FILE}")
+        _log.info("Loaded %d OUI entries.", len(_oui_cache))
     except Exception as e:
-        print(f"[extract] ERROR loading vendor file: {e}")
+        _log.error("Failed to load vendor file.")
+        _log.debug("Vendor load error: %s", e)
         _loaded = True
 
 

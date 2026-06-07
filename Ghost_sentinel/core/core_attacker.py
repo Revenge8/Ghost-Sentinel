@@ -13,6 +13,12 @@ from utils.scapy_iface import resolve_iface
 
 _MAC_RE = re.compile(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$')
 
+_PRIVATE_NETS = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
 def _valid_mac(mac: str) -> bool:
     return bool(_MAC_RE.match(mac or ''))
 
@@ -20,6 +26,13 @@ def _valid_ip(ip: str) -> bool:
     try:
         ipaddress.IPv4Address(ip)
         return True
+    except Exception:
+        return False
+
+def _is_private_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.IPv4Address(ip)
+        return any(addr in net for net in _PRIVATE_NETS)
     except Exception:
         return False
 
@@ -35,6 +48,10 @@ def _validate(target_ip, target_mac, gateway_ip, gateway_mac) -> str | None:
         return f"Invalid gateway MAC: {gateway_mac}"
     if target_ip == gateway_ip:
         return "Target and gateway IP must differ."
+    if not _is_private_ip(target_ip):
+        return "Target IP must be a private network address."
+    if not _is_private_ip(gateway_ip):
+        return "Gateway IP must be a private network address."
     return None
 
 def _resolve_mac(ip: str, iface: str, timeout: float = 1.0) -> str:

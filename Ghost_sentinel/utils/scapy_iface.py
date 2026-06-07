@@ -14,6 +14,19 @@ from typing import Any
 
 _log = logging.getLogger(__name__)
 _IS_WINDOWS = sys.platform.startswith("win")
+_MAX_IFACE_HINT_LEN = 256
+
+
+def _sanitize_iface_hint(hint: str) -> str:
+    """Strip control characters and cap length for user-supplied interface hints."""
+    if not hint:
+        return ""
+    hint = str(hint).strip()
+    if len(hint) > _MAX_IFACE_HINT_LEN:
+        hint = hint[:_MAX_IFACE_HINT_LEN]
+    if any(ord(c) < 32 for c in hint):
+        return ""
+    return hint
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +275,7 @@ def resolve_iface(hint: str = "") -> str:
     except Exception:
         default = ""
 
+    hint = _sanitize_iface_hint(hint)
     if not hint:
         return default
 
@@ -285,4 +299,7 @@ def resolve_iface(hint: str = "") -> str:
     return default
 
 
-__all__ = ["list_scapy_ifaces", "resolve_iface"]
+__all__ = ["list_scapy_ifaces", "resolve_iface", "sanitize_iface_hint"]
+
+# Public alias for interface hint validation
+sanitize_iface_hint = _sanitize_iface_hint

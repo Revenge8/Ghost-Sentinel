@@ -8,10 +8,16 @@ import logging
 import threading
 import tempfile
 
-DB_FILE = "data/devices.json"
+DB_FILE = os.path.join(_ROOT, "data", "devices.json")
+
+# Keys that must never be persisted to device storage
+_SENSITIVE_KEYS = frozenset({
+    "password", "passwd", "secret", "token", "api_key", "apikey",
+    "private_key", "credential", "credentials", "auth", "authorization",
+})
 
 # Single lock protecting all file I/O — prevents concurrent write corruption
-_lock = threading.Lock()
+_lock = threading.RLock()
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +45,13 @@ def _atomic_write(path: str, data: list):
         except OSError:
             pass
         raise
+
+
+def _sanitize_device(dev: dict) -> dict:
+    """Strip sensitive fields before persisting device records."""
+    if not isinstance(dev, dict):
+        return {}
+    return {k: v for k, v in dev.items() if str(k).lower() not in _SENSITIVE_KEYS}
 
 
 def _merge_device(existing: dict, new_data: dict) -> dict:
@@ -87,8 +100,9 @@ def save_devices(devices_list: list):
         return
 
     try:
+        sanitized = [_sanitize_device(d) for d in devices_list if isinstance(d, dict)]
         with _lock:
-            _atomic_write(DB_FILE, devices_list)
+            _atomic_write(DB_FILE, sanitized)
     except Exception as e:
         log.error("Failed to save devices: %s", e)
 
@@ -146,12 +160,12 @@ def update_device_info(mac: str, new_data: dict):
             found = False
             for i, dev in enumerate(devices):
                 if dev.get("mac") == mac:
-                    devices[i] = _merge_device(dev, new_data)
+                    devices[i] = _sanitize_device(_merge_device(dev, new_data))
                     found = True
                     break
 
             if not found:
-                devices.append({"mac": mac, **new_data})
+                devices.append(_sanitize_device({"mac": mac, **new_data}))
 
             _atomic_write(DB_FILE, devices)
 

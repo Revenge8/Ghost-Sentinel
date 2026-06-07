@@ -47,7 +47,7 @@ def _load_oui_db() -> None:
         if _oui_loaded:
             return
         if not _VENDORS_FILE:
-            print("[scanner] WARNING: no vendor file found in data/")
+            _log.warning("No vendor file found in data/")
             _oui_loaded = True
             return
         try:
@@ -64,9 +64,10 @@ def _load_oui_db() -> None:
                     _oui_cache[key] = vendor
                     loaded += 1
             _oui_loaded = True
-            print(f"[scanner] OUI database loaded — {loaded:,} entries")
+            _log.info("OUI database loaded — %s entries", f"{loaded:,}")
         except Exception as exc:
-            print(f"[scanner] ERROR loading OUI database: {exc}")
+            _log.error("Failed to load OUI database.")
+            _log.debug("OUI load error: %s", exc)
             _oui_loaded = True
 
 
@@ -229,11 +230,21 @@ def probe_os(ip: str, mac: str = "", vendor: str = "",
 _MAX_ARP_HOSTS = 4096
 
 
+def _mask_mac(mac: str) -> str:
+    """Mask MAC for non-essential logs (first 3 octets only)."""
+    if not mac:
+        return "?"
+    parts = mac.replace("-", ":").split(":")
+    if len(parts) >= 3:
+        return ":".join(parts[:3]) + ":**:**"
+    return "**:**:**:**:**:**"
+
+
 def _validate_range(network_str: str) -> tuple[bool, str]:
     try:
         net = ipaddress.ip_network(network_str, strict=False)
-    except ValueError as exc:
-        return False, f"Invalid CIDR: {exc}"
+    except ValueError:
+        return False, "Invalid CIDR notation."
     if net.version != 4:
         return False, "Only IPv4 is supported."
     if any(net.network_address in p for p in _PRIVATE_NETS):
@@ -348,7 +359,7 @@ def _arp_sweep(
                 current_done = done_count
                 if result:
                     results.append(result)
-                    _log.info("ARP reply: %s → %s", result[0], result[1])
+                    _log.info("ARP reply: %s → %s", result[0], _mask_mac(result[1]))
 
             if callable(progress_cb):
                 try:
@@ -397,7 +408,8 @@ def scan_network_logic(
         if not targets:
             return [], None
     except Exception as exc:
-        return [], f"Range parse error: {exc}"
+        _log.debug("Range parse error: %s", exc)
+        return [], "Invalid network range."
 
     try:
         raw = _arp_sweep(
@@ -407,7 +419,8 @@ def scan_network_logic(
     except PermissionError:
         return [], "Permission denied — run Ghost Sentinel as Administrator."
     except Exception as exc:
-        return [], f"ARP sweep error: {exc}"
+        _log.exception("ARP sweep failed: %s", exc)
+        return [], "ARP sweep failed."
 
     if not raw:
         _log.info("ARP sweep complete — no hosts replied.")
